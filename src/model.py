@@ -1,139 +1,144 @@
 """
-train.py — FridgeAI
-Fine-tune YOLOv8 on a food ingredient dataset.
+model.py — FridgeAI
+Wrapper around YOLOv8 for food ingredient detection.
 
-Usage:
-    python src/train.py --data data/processed/dataset.yaml --epochs 30 --batch 16
-    python src/train.py --epochs 5 --batch 8   # quick test on Colab free GPU
+Responsibilities:
+    - Load a pretrained or fine-tuned YOLOv8 model
+    - Expose a clean predict() interface used by infer.py and app.py
+    - Provide model info / class names utilities
 """
 
-import argparse
-import os
 from pathlib import Path
+from typing import List, Optional, Union
 
 from ultralytics import YOLO
 
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# Default paths
 # ---------------------------------------------------------------------------
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train YOLOv8 for food detection")
-
-    parser.add_argument(
-        "--data",
-        type=str,
-        default="data/processed/dataset.yaml",
-        help="Path to the YOLO dataset config file (.yaml)",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="yolov8n.pt",          # 'n' = nano, fastest on Colab free tier
-        help="YOLOv8 variant: yolov8n.pt | yolov8s.pt | yolov8m.pt",
-    )
-    parser.add_argument("--epochs",  type=int,   default=30)
-    parser.add_argument("--batch",   type=int,   default=16)
-    parser.add_argument("--img",     type=int,   default=640,  help="Input image size")
-    parser.add_argument("--lr",      type=float, default=0.01, help="Initial learning rate")
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="'cuda' for GPU, 'cpu' for CPU, '0' for first GPU",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="outputs/checkpoints",
-        help="Directory to save checkpoints",
-    )
-    parser.add_argument(
-        "--patience",
-        type=int,
-        default=10,
-        help="Early stopping patience (epochs without improvement)",
-    )
-
-    return parser.parse_args()
+DEFAULT_WEIGHTS = "yolov8n.pt"                              # COCO pretrained (fallback)
+FRIDGE_WEIGHTS  = "outputs/checkpoints/fridgeai_run/weights/best.pt"
 
 
 # ---------------------------------------------------------------------------
-# Training
+# FridgeModel
 # ---------------------------------------------------------------------------
 
-def train(args):
+class FridgeModel:
     """
-    Fine-tune YOLOv8 on the food dataset.
+    Thin wrapper around Ultralytics YOLO.
 
-    The training loop (forward pass → loss → backward → optimizer step)
-    is handled internally by the Ultralytics YOLO trainer.
-    Here we configure all the key hyperparameters and paths.
+    Usage:
+        model = FridgeModel()                        # loads best.pt if it exists
+        model = FridgeModel(weights="yolov8n.pt")    # load specific weights
+        detections = model.predict("image.jpg")
     """
 
-    # Create output directory if it doesn't exist
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, weights: Optional[str] = None):
+        """
+        Load YOLOv8 weights.
 
-    # Load pretrained YOLOv8 weights (transfer learning)
-    # Starting from COCO weights so the model already knows basic shapes
-    print(f"Loading model: {args.model}")
-    model = YOLO(args.model)
+        Priority:
+            1. Explicit `weights` argument
+            2. Fine-tuned best.pt  (outputs/checkpoints/fridgeai_run/weights/best.pt)
+            3. COCO pretrained     (yolov8n.pt)
+        """
+        if weights is not None:
+            weights_path = weights
+        elif Path(FRIDGE_WEIGHTS).exists():
+            weights_path = FRIDGE_WEIGHTS
+            print(f"[FridgeModel] Loading fine-tuned weights: {weights_path}")
+        else:
+            weights_path = DEFAULT_WEIGHTS
+            print(f"[FridgeModel] Fine-tuned weights not found. Loading pretrained: {weights_path}")
 
-    # -----------------------------------------------------------------------
-    # Fine-tuning
-    # The YOLO trainer runs:
-    #   1. Forward pass  → predictions (bounding boxes + class scores)
-    #   2. Loss          → combined: box loss + classification loss + objectness loss
-    #   3. Backward pass → backpropagation (chain rule, as in the lecture notes)
-    #   4. Optimizer step → SGD / Adam update
-    # Validation mAP is computed at the end of each epoch.
-    # -----------------------------------------------------------------------
-
-    print(f"\nStarting training for {args.epochs} epochs...")
-    print(f"Dataset config: {args.data}")
-    print(f"Device: {args.device}\n")
-
-    results = model.train(
-        data=args.data,
-        epochs=args.epochs,
-        batch=args.batch,
-        imgsz=args.img,
-        lr0=args.lr,
-        device=args.device,
-        patience=args.patience,         # early stopping
-        save=True,                      # save best.pt and last.pt
-        project=str(output_dir),
-        name="fridgeai_run",
-        exist_ok=True,
-        pretrained=True,                # use COCO pretrained weights
-        verbose=True,
-    )
+        self.model = YOLO(weights_path)
+        self.weights_path = weights_path
 
     # -----------------------------------------------------------------------
-    # Results summary
+    # Inference
     # -----------------------------------------------------------------------
 
-    print("\n--- Training complete ---")
-    print(f"Best weights saved to: {output_dir}/fridgeai_run/weights/best.pt")
-    print(f"Last weights saved to: {output_dir}/fridgeai_run/weights/last.pt")
+    def predict(
+        self,
+        source: Union[str, list],
+        conf: float = 0.25,
+        iou: float = 0.45,
+        imgsz: int = 640,
+        device: str = "cpu",
+        verbose: bool = False,
+    ):
+        """
+        Run object detection on one or more images.
 
-    # Print key metrics (for the report)
-    metrics = results.results_dict
-    print(f"\nFinal validation metrics:")
-    print(f"  mAP@0.5       : {metrics.get('metrics/mAP50(B)', 'N/A'):.4f}")
-    print(f"  mAP@0.5:0.95  : {metrics.get('metrics/mAP50-95(B)', 'N/A'):.4f}")
-    print(f"  Precision     : {metrics.get('metrics/precision(B)', 'N/A'):.4f}")
-    print(f"  Recall        : {metrics.get('metrics/recall(B)', 'N/A'):.4f}")
+        Args:
+            source  : path to image, list of paths, or directory
+            conf    : minimum confidence threshold (0–1)
+            iou     : NMS IoU threshold (0–1)
+            imgsz   : inference image size
+            device  : 'cpu' or 'cuda'
+            verbose : print per-image results
 
-    return results
+        Returns:
+            list of ultralytics Results objects
+            Each result has:
+                .boxes.xyxy       — bounding boxes (x1,y1,x2,y2)
+                .boxes.conf       — confidence scores
+                .boxes.cls        — class indices
+                .names            — dict {idx: class_name}
+        """
+        results = self.model.predict(
+            source=source,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            device=device,
+            verbose=verbose,
+        )
+        return results
+
+    # -----------------------------------------------------------------------
+    # Utilities
+    # -----------------------------------------------------------------------
+
+    def get_class_names(self) -> dict:
+        """Return {class_idx: class_name} dict from the loaded model."""
+        return self.model.names
+
+    def get_ingredient_list(self, results) -> List[str]:
+        """
+        Extract unique detected ingredient names from predict() results.
+
+        Args:
+            results: list of Results from predict()
+
+        Returns:
+            Sorted list of unique ingredient names detected across all images.
+            Example: ['apple', 'carrot', 'egg']
+        """
+        detected = set()
+        names = self.get_class_names()
+
+        for result in results:
+            for cls_idx in result.boxes.cls.tolist():
+                detected.add(names[int(cls_idx)])
+
+        return sorted(detected)
+
+    def info(self):
+        """Print model summary (layers, parameters, etc.)."""
+        self.model.info()
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Quick test
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    args = parse_args()
-    train(args)
+    # Sanity check — loads model and prints class names
+    model = FridgeModel()
+    print("\nAvailable classes:")
+    for idx, name in model.get_class_names().items():
+        print(f"  {idx:3d}: {name}")
