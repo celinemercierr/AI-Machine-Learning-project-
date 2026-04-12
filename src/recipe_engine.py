@@ -257,6 +257,42 @@ def print_output(output):
                   f"fat: {info['fat_100g']}g")
     print("="*50)
 
+# ---------------------------------------------------------------------------
+# Class wrapper (used by app.py)
+# ---------------------------------------------------------------------------
+
+class RecipeEngine:
+    def __init__(
+        self,
+        recipes_path: str = "/root/.cache/kagglehub/datasets/saldenisov/recipenlg/versions/1",
+        nutrition_path: str = "/root/.cache/kagglehub/datasets/openfoodfacts/world-food-facts/versions/5",
+        top_k: int = 3,
+    ):
+        self.recipes_path   = recipes_path
+        self.nutrition_path = nutrition_path
+        self.top_k          = top_k
+
+    def generate(self, ingredients: list[str]) -> str:
+        output = run(
+            ingredients=ingredients,
+            recipes_path=self.recipes_path,
+            nutrition_path=self.nutrition_path,
+            top_k=self.top_k,
+        )
+        # Format as readable text for the Gradio UI
+        lines = []
+        for i, recipe in enumerate(output['recipes'], 1):
+            lines.append(f"{i}. {recipe['title']}  (matches {recipe['match_score']} ingredients)")
+            try:
+                directions = json.loads(recipe['directions'])
+                if isinstance(directions, list) and directions:
+                    lines.append(f"   → {directions[0][:120]}...")
+            except:
+                pass
+            lines.append("")
+        return "\n".join(lines) if lines else "No recipes found for these ingredients."
+
+
 
 # ---------------------------------------------------------------------------
 # Entry point
