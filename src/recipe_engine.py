@@ -32,13 +32,13 @@ def parse_args():
     parser.add_argument(
         "--recipes_path",
         type=str,
-        default="/root/.cache/kagglehub/datasets/saldenisov/recipenlg/versions/1",
+        default="/home/codespace/.cache/kagglehub/datasets/saldenisov/recipenlg/versions/1",
         help="Path to RecipeNLG dataset",
     )
     parser.add_argument(
         "--nutrition_path",
         type=str,
-        default="/root/.cache/kagglehub/datasets/openfoodfacts/world-food-facts/versions/5",
+        default="/home/codespace/.cache/kagglehub/datasets/openfoodfacts/world-food-facts/versions/5",
         help="Path to Open Food Facts dataset",
     )
     parser.add_argument(
@@ -264,8 +264,8 @@ def print_output(output):
 class RecipeEngine:
     def __init__(
         self,
-        recipes_path: str = "/root/.cache/kagglehub/datasets/saldenisov/recipenlg/versions/1",
-        nutrition_path: str = "/root/.cache/kagglehub/datasets/openfoodfacts/world-food-facts/versions/5",
+        recipes_path: str = "/home/codespace/.cache/kagglehub/datasets/saldenisov/recipenlg/versions/1",
+        nutrition_path: str = "/home/codespace/.cache/kagglehub/datasets/openfoodfacts/world-food-facts/versions/5",
         top_k: int = 3,
     ):
         self.recipes_path   = recipes_path
