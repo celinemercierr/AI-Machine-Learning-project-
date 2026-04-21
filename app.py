@@ -5,8 +5,8 @@ End-to-end demo: upload a fridge photo → detect ingredients → generate recip
 Run locally:
     python app.py
 
-Run on Colab:
-    !python app.py
+Run on Colab / Codespaces:
+    python app.py
     # Then open the public URL that Gradio prints
 """
 
@@ -15,18 +15,29 @@ from PIL import Image
 import tempfile
 import os
 
-from src.model import FridgeModel
-from src.recipe_engine import RecipeEngine   # adjust if your import differs
+from ultralytics import YOLO
+from src.infer import detect_ingredients
+from src.recipe_engine import RecipeEngine
 
 
 # ---------------------------------------------------------------------------
-# Load model once at startup
+# Load model + recipe engine once at startup
 # ---------------------------------------------------------------------------
 
-print("Loading FridgeAI model...")
-model = FridgeModel()   # loads best.pt if available, else yolov8n.pt
+WEIGHTS_PATH = "outputs/checkpoints/fridgeai_run/weights/best.pt"
+
+# Verify weights exist, fallback to base yolov8n if not found
+if not os.path.exists(WEIGHTS_PATH):
+    print(f"[WARN] Trained weights not found at {WEIGHTS_PATH}")
+    print("[WARN] Falling back to yolov8n.pt (pretrained, not fine-tuned)")
+    WEIGHTS_PATH = "yolov8n.pt"
+
+print(f"Loading model: {WEIGHTS_PATH}")
+# Pre-load model once so we don't reload on every request
+_model = YOLO(WEIGHTS_PATH)
+
 recipe_engine = RecipeEngine()
-print("Ready.\n")
+print("FridgeAI ready.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -37,47 +48,68 @@ def run_pipeline(image: Image.Image, confidence: float):
     """
     Full pipeline:
         1. Save PIL image to temp file (YOLO needs a path)
-        2. Run detection with FridgeModel
-        3. Extract ingredient list
-        4. Generate recipes
+        2. Run detection → multiple ingredients with counts & relevance
+        3. Generate annotated image with bounding boxes
+        4. Generate recipes + nutrition via Gemini (or fallback)
         5. Return annotated image + ingredient list + recipes
     """
     if image is None:
         return None, "Please upload an image.", ""
 
-    # Save to temp file
+    # Save to temp file (YOLO needs a file path)
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp_path = tmp.name
         image.save(tmp_path)
 
     try:
-        # 1. Detect ingredients
-        results = model.predict(
-            source=tmp_path,
+        # ---- 1. Detect ingredients (new infer.py) --------------------------
+        output = detect_ingredients(
+            image_path=tmp_path,
+            weights=WEIGHTS_PATH,
             conf=confidence,
-            device="cpu",   # Gradio usually runs on CPU for demo
-            verbose=False,
+            debug=False,
         )
 
-        # 2. Get annotated image (YOLO renders bounding boxes)
-        annotated = results[0].plot()   # numpy array (BGR)
+        ingredients = output["ingredients"]      # sorted by relevance
+        summary     = output["summary"]           # count, area, relevance per ingredient
+        detections  = output["detections"]        # every individual box
+
+        # ---- 2. Annotated image with bounding boxes -------------------------
+        results = _model.predict(
+            source=tmp_path,
+            conf=confidence,
+            verbose=False,
+        )
+        annotated = results[0].plot()                        # numpy BGR
         annotated_pil = Image.fromarray(annotated[..., ::-1])  # BGR → RGB
 
-        # 3. Extract ingredient names
-        ingredients = model.get_ingredient_list(results)
-
+        # ---- 3. Format ingredient list for display --------------------------
         if not ingredients:
-            return annotated_pil, "No ingredients detected. Try lowering the confidence threshold.", ""
+            return (
+                annotated_pil,
+                "No ingredients detected.\nTry lowering the confidence slider.",
+                "",
+            )
 
-        ingredient_text = "\n".join(f"• {ing.replace('-', ' ').title()}" for ing in ingredients)
+        ing_lines = []
+        for s in summary:
+            name  = s["ingredient"].replace("-", " ").title()
+            count = s["count"]
+            conf  = s["avg_confidence"]
+            ing_lines.append(f"• {name}  ×{count}  (conf {conf:.0%})")
 
-        # 4. Generate recipes
-        recipes = recipe_engine.generate(ingredients)
+        ingredient_text = "\n".join(ing_lines)
+
+        # ---- 4. Generate recipes + nutrition --------------------------------
+        recipes_text = recipe_engine.generate(
+            ingredients=ingredients,
+            summary=summary,
+        )
 
     finally:
         os.unlink(tmp_path)
 
-    return annotated_pil, ingredient_text, recipes
+    return annotated_pil, ingredient_text, recipes_text
 
 
 # ---------------------------------------------------------------------------
@@ -87,43 +119,47 @@ def run_pipeline(image: Image.Image, confidence: float):
 with gr.Blocks(title="FridgeAI", theme=gr.themes.Soft()) as demo:
 
     gr.Markdown("""
-    # 🧊 FridgeAI
+    # FridgeAI
     ### Snap your fridge → discover what you can cook
     Upload a photo of your fridge or ingredients and FridgeAI will detect what's inside
-    and suggest recipes you can make right now.
+    and suggest recipes you can make right now — with nutritional info.
     """)
 
     with gr.Row():
         with gr.Column(scale=1):
             image_input = gr.Image(
                 type="pil",
-                label="📷 Upload your fridge photo",
+                label="Upload your fridge photo",
                 height=350,
             )
             confidence_slider = gr.Slider(
-                minimum=0.1,
-                maximum=0.9,
-                value=0.25,
+                minimum=0.05,
+                maximum=0.90,
+                value=0.20,
                 step=0.05,
                 label="Detection confidence threshold",
-                info="Lower = detect more (may include false positives). Higher = stricter."
+                info="Lower = detect more (may include false positives). Higher = stricter.",
             )
-            detect_btn = gr.Button("🔍 Detect & Generate Recipes", variant="primary", size="lg")
+            detect_btn = gr.Button(
+                "Detect & Generate Recipes",
+                variant="primary",
+                size="lg",
+            )
 
         with gr.Column(scale=1):
-            image_output = gr.Image(label="🎯 Detected Ingredients", height=350)
+            image_output = gr.Image(label="Detected Ingredients", height=350)
 
     with gr.Row():
         with gr.Column(scale=1):
             ingredients_output = gr.Textbox(
-                label="🥦 Detected Ingredients",
-                lines=8,
+                label="Detected Ingredients",
+                lines=10,
                 interactive=False,
             )
         with gr.Column(scale=2):
             recipes_output = gr.Textbox(
-                label="👨‍🍳 Recipe Suggestions",
-                lines=8,
+                label="Recipe Suggestions & Nutrition",
+                lines=18,
                 interactive=False,
             )
 
@@ -136,7 +172,8 @@ with gr.Blocks(title="FridgeAI", theme=gr.themes.Soft()) as demo:
     gr.Markdown("""
     ---
     **FridgeAI** · IE Business School · AI & Machine Learning · April 2026
-    Model: YOLOv8n fine-tuned on Food Recognition 2022 (50 classes)
+    Model: YOLOv8 fine-tuned on Food Recognition 2022 (50 classes) ·
+    Recipes: Gemini API / RecipeNLG fallback
     """)
 
 
@@ -146,6 +183,6 @@ with gr.Blocks(title="FridgeAI", theme=gr.themes.Soft()) as demo:
 
 if __name__ == "__main__":
     demo.launch(
-        share=True,      # generates a public URL — essential for Colab
+        share=True,      # public URL — essential for Colab/Codespaces
         debug=False,
     )
